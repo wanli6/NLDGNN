@@ -2,3 +2,6 @@
 .DS_Store
 log/
 trained_model_dict/
+data/
+new_data/
+.ipynb_checkpoints
