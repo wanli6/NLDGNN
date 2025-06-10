@@ -179,6 +179,7 @@ class GraphTrainer:
 
         self.predictor.load_state_dict(torch.load(mlp_checkpt_file))
         _, best_acc = self.test_step(test_mask, self.predictor, criterion_mlp)
+        os.remove(mlp_checkpt_file)
         return best_acc
 
     def run_training(self, split=0):
@@ -251,6 +252,8 @@ class GraphTrainer:
 
         self.model.load_state_dict(torch.load(checkpt_file))
         _, best_acc = self.test_step(test_mask, self.model, criterion, adj=adj)
+        # 删除checkpt_file
+        os.remove(checkpt_file)
         return best_acc
 
 
