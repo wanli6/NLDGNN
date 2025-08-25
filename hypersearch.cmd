@@ -1,1 +1,0 @@
-python hyper.py --data romanempire --trials 1000
