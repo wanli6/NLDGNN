@@ -88,3 +88,18 @@ def load_fixed_data_split(dataname, split_idx, device='cuda:0'):
     val_mask = torch.BoolTensor(val_mask_list[split_idx]).to(device)
     test_mask = torch.BoolTensor(test_mask_list[split_idx]).to(device)
     return train_mask, val_mask, test_mask
+
+
+def write_timecost_log(filename: str, dataset_name: str, total_time: float):
+    """
+    将训练耗时信息写入csv文件，每行包含数据集名称和耗时。
+    """
+    import os
+    import csv
+    header = ['dataset', 'total_time_seconds']
+    write_header = not os.path.exists(filename)
+    with open(filename, 'a', newline='') as f:
+        writer = csv.writer(f)
+        if write_header:
+            writer.writerow(header)
+        writer.writerow([dataset_name, f"{total_time:.4f}"])

@@ -20,6 +20,8 @@ from torch_geometric.data import Data
 import pandas as pd
 
 from utils import load_data, load_fixed_data_split
+from utils import write_timecost_log
+import datetime
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -66,9 +68,9 @@ parser.add_argument('--weight', type=float, default=0.5)
 
 args = parser.parse_args()
 
-optimized_params = nni.get_next_parameter()
-for key, value in optimized_params.items():
-    setattr(args, key, value)
+# optimized_params = nni.get_next_parameter()
+# for key, value in optimized_params.items():
+#     setattr(args, key, value)
 
 device = 'cuda:0'
 
@@ -82,16 +84,16 @@ table_datasets = [
     'blogcatalog', 'flickr',
     'photo', 'wikics', 'pubmed',
 ]
-
+class_num = None
 if args.data in citation:
     dataset = WebKB(root='data/', name=args.data)
     data = dataset[0].to(device)
 elif args.data in ['squirrel', 'chameleon']:
     dataset = WikipediaNetwork(root='data/', name=args.data)
     data = dataset[0].to(device)
-elif args.data == 'actor':
-    dataset = Actor(root='data/Actor')
-    data = dataset[0].to(device)
+# elif args.data == 'actor':
+#     dataset = Actor(root='data/Actor')
+#     data = dataset[0].to(device)
 elif args.data in hetero_graphs:
     dataset = Dataset(name=args.data,
                       add_self_loops=False,
@@ -198,6 +200,7 @@ def train_mlp():
     best = 100
     patience = args.patience
     count = 0
+    
     for i in range(1000):
         _ = train_step(train_mask, predictor, mlp_optimizer, criterion=criterion_mlp)
         val_loss, val_acc, _ = val_step(val_mask, predictor, criterion=criterion_mlp)
@@ -214,6 +217,8 @@ def train_mlp():
     loss, best_acc = test_step(test_mask, predictor, criterion=criterion_mlp)
     mlp_acc.append(best_acc)
     print(f'{args.estimator} acc: {best_acc:.3f}')
+    
+    return best_acc
 
 
 edge_index, _ = remove_self_loops(data.edge_index)
@@ -221,7 +226,20 @@ row, col = edge_index
 connect = torch.sparse_coo_tensor(edge_index, torch.ones_like(edge_index[0]),
                                   size=[y.size(0), y.size(0)]).float()
 
+# 记录训练开始时间
+start_time = time.time()
+
+# 用于记录每轮次的时间
+round_times = []
+# 用于记录所有epoch的时间
+all_epoch_times = []
+# 用于记录模拟器模型的准确率
+estimator_acc = []
+
 for i in range(10):
+    # 记录每轮次开始时间
+    round_start_time = time.time()
+    
     split = i % 10
     if args.data in table_datasets:
         train_mask, val_mask, test_mask = load_fixed_data_split(args.data, split, device)
@@ -248,7 +266,7 @@ for i in range(10):
     mlp_optimizer = torch.optim.Adam(params=predictor.parameters(), lr=args.lr, weight_decay=args.weight_decay)
     gnn_optimizer = torch.optim.Adam(params=model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
-    train_mlp()
+    estimator_acc.append(train_mlp())
     if args.estimator == 'mlp':
         mlp_out = predictor(data.x)
     else:
@@ -281,13 +299,16 @@ for i in range(10):
     patience = args.patience
     best_val_acc = 0
     count = 0
-    total_time = time.time()
-    times = []
+    
+    # 记录GNN训练开始时间
+    gnn_start_time = time.time()
+    epoch_count = 0
+    
     for j in range(1000):
-        t = time.time()
         train_loss = train_step(train_mask, model, gnn_optimizer, criterion, adj=adj)
-        times.append(time.time() - t)
         val_loss, val_acc, out = val_step(val_mask, model, criterion, adj=adj)
+        epoch_count += 1
+        
         if val_loss < best:
             count = 0
             best = val_loss
@@ -299,8 +320,15 @@ for i in range(10):
             count += 1
             if count == patience:
                 break
-    # print()
-    # print(time.time()-total_time)
+    
+    # 记录GNN训练结束时间
+    gnn_end_time = time.time()
+    gnn_training_time = gnn_end_time - gnn_start_time
+    
+    print(f'GNN训练轮次: {epoch_count}, 总时间: {gnn_training_time:.2f}s')
+    
+    # 将epoch数量添加到总列表中用于计算平均epoch时间
+    all_epoch_times.append(epoch_count)
 
     model.load_state_dict(torch.load(checkpt_file))
     loss, best_acc = test_step(test_mask, model, criterion, adj=adj)
@@ -308,55 +336,120 @@ for i in range(10):
         glo_best_acc = best_acc
         glo_best_model = model
     acc.append(best_acc)
+    
+    # 记录每轮次结束时间
+    round_end_time = time.time()
+    round_time = round_end_time - round_start_time
+    round_times.append(round_time)
+    
     print('-------------------------------------------------------------')
-    print(f'intermediate result: {best_acc}')
-    nni.report_intermediate_result(best_acc)
+    print(f'Round {i+1} - 模拟器模型准确率: {estimator_acc[-1]:.4f}, 主模型准确率: {best_acc:.4f}, 时间: {round_time:.2f}s')
+    # nni.report_intermediate_result(best_acc)
 
-print('---------------------------------------')
-print(f'{args.data}: mean acc:{np.mean(acc)}')
+# 记录训练结束时间
+end_time = time.time()
+total_time = end_time - start_time
 
-nni.report_final_result(np.mean(acc))
-print(np.std(np.array(acc)))
+# 计算平均每轮次耗时和总的平均epoch耗时
+avg_round_time = np.mean(round_times)
+total_epochs = sum(all_epoch_times)
+avg_epoch_time = total_time / total_epochs if total_epochs > 0 else 0
 
-with open('result.txt', 'a') as f:  # 打开文件，'a'模式表示追加
-    f.write(
-        f'{args.data} weight : {args.weight}  Accuracy : {np.mean(acc).round(4) * 100} {np.std(np.array(acc)).round(4) * 100} \n')
+# 输出详细的时间统计信息
+print('=' * 60)
+print('训练时间统计:')
+print(f'总训练时间: {total_time:.2f}秒 ({total_time/60:.2f}分钟)')
+print(f'平均每轮次耗时: {avg_round_time:.2f}秒')
+print(f'总epoch数: {total_epochs}')
+print(f'平均每个epoch耗时: {avg_epoch_time:.4f}秒')
+print(f'最快轮次: {min(round_times):.2f}秒')
+print(f'最慢轮次: {max(round_times):.2f}秒')
+print(f'轮次时间标准差: {np.std(round_times):.2f}秒')
+print('=' * 60)
 
 
-data_dict = {
-    'Dataset': args.data,
-    'Weight': args.weight,
-    'Mean': np.mean(acc).round(4) * 100,
-    "Std": np.std(np.array(acc)).round(4) * 100,
-}
 
-for i,value in enumerate(acc):
-    data_dict[f'Acc_{i+1}'] = [value]
+# # 将准确率统计信息写入accuracy_result.csv文件
+# import csv
+# import os
 
-df = pd.DataFrame(data_dict)
-# 指定CSV文件路径
-csv_file_path = 'result.csv'
+# # 准确率结果文件
+# accuracy_file = 'accuracy_result.csv'
+# accuracy_file_exists = os.path.exists(accuracy_file)
 
-# 检查文件是否存在，以确定是否需要写入头部
-header = False
-if not pd.io.common.file_exists(csv_file_path):
-    header = True
+# with open(accuracy_file, 'a', newline='', encoding='utf-8') as f:
+#     writer = csv.writer(f)
+    
+#     # 如果文件不存在，写入表头
+#     if not accuracy_file_exists:
+#         writer.writerow(['Dataset', 'Main_Model_Mean_Accuracy', 'Main_Model_Std_Accuracy', 'Estimator_Model_Mean_Accuracy', 'Estimator_Model_Std_Accuracy'])
+    
+#     # 写入一行包含两个模型的准确率数据
+#     writer.writerow([
+#         args.data, 
+#         f"{np.mean(acc).round(4) * 100:.2f}", 
+#         f"{np.std(np.array(acc)).round(4) * 100:.2f}",
+#         f"{np.mean(estimator_acc).round(4) * 100:.2f}", 
+#         f"{np.std(np.array(estimator_acc)).round(4) * 100:.2f}"
+#     ])
 
-# 以追加模式保存DataFrame到CSV文件，不包含头部（除非文件不存在）
-df.to_csv(csv_file_path, mode='a', index=False, header=header)
-with open('best_acc.csv', 'r') as f:
-    reader = csv.DictReader(f)
-    best_acc = {row['dataset']: float(row['accuracy']) for row in reader}
-    if args.data not in best_acc:
-        best_acc[args.data] = 0
-    if best_acc[args.data] < np.mean(acc):
-        best_acc[args.data] = np.mean(acc)
-with open('best_acc.csv', 'w', newline='') as csv_file:
-    # 创建 CSV 写入器
-    writer = csv.writer(csv_file)
-    writer.writerow(['dataset', 'accuracy'])
-    for dataset_name, accuracy in best_acc.items():
-        writer.writerow([dataset_name, accuracy])
+# # 将时间统计信息写入time_result.csv文件
+# time_file = 'time_result.csv'
+# time_file_exists = os.path.exists(time_file)
+
+# with open(time_file, 'a', newline='', encoding='utf-8') as f:
+#     writer = csv.writer(f)
+    
+#     # 如果文件不存在，写入表头
+#     if not time_file_exists:
+#         writer.writerow(['Dataset', 'Total_Time(s)', 'Avg_Round_Time(s)', 'Avg_Epoch_Time(s)', 'Total_Epochs', 'Min_Round_Time(s)', 'Max_Round_Time(s)'])
+    
+#     # 写入时间统计信息
+#     writer.writerow([
+#         args.data,
+#         f"{total_time:.2f}",
+#         f"{avg_round_time:.2f}",
+#         f"{avg_epoch_time:.4f}",
+#         total_epochs,
+#         f"{min(round_times):.2f}",
+#         f"{max(round_times):.2f}"
+#     ])
+
+
+# data_dict = {
+#     'Dataset': args.data,
+#     'Weight': args.weight,
+#     'Mean': np.mean(acc).round(4) * 100,
+#     "Std": np.std(np.array(acc)).round(4) * 100,
+# }
+#
+# for i,value in enumerate(acc):
+#     data_dict[f'Acc_{i+1}'] = [value]
+#
+# df = pd.DataFrame(data_dict)
+# # 指定CSV文件路径
+# csv_file_path = 'result.csv'
+#
+# # 检查文件是否存在，以确定是否需要写入头部
+# header = False
+# if not pd.io.common.file_exists(csv_file_path):
+#     header = True
+#
+# # 以追加模式保存DataFrame到CSV文件，不包含头部（除非文件不存在）
+# df.to_csv(csv_file_path, mode='a', index=False, header=header)
+# with open('best_acc.csv', 'r') as f:
+#     reader = csv.DictReader(f)
+#     best_acc = {row['dataset']: float(row['accuracy']) for row in reader}
+#     if args.data not in best_acc:
+#         best_acc[args.data] = 0
+#     if best_acc[args.data] < np.mean(acc):
+#         best_acc[args.data] = np.mean(acc)
+# with open('best_acc.csv', 'w', newline='') as csv_file:
+#     # 创建 CSV 写入器
+#     writer = csv.writer(csv_file)
+#     writer.writerow(['dataset', 'accuracy'])
+#     for dataset_name, accuracy in best_acc.items():
+#         writer.writerow([dataset_name, accuracy])
 #
 # model = glo_best_model
 
@@ -367,4 +460,6 @@ with open('best_acc.csv', 'w', newline='') as csv_file:
 # print('Test acc: ', acc)
 # print(f"Save {args.data}_out.pt")
 # torch.save(out, f'save/{args.data}_out.pt')
+
+
 
